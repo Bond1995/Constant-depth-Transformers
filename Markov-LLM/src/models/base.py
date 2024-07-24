@@ -103,19 +103,8 @@ class CausalSelfAttention(nn.Module):
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
             att = att.masked_fill(torch.tril(torch.ones(T, T, device=self.device)).view(1, 1, T, T) == 0, float('-inf'))
             att = F.softmax(att, dim=-1)
-            att_mean = att.mean(dim=0).squeeze()
-            att_std = att.std(dim=0).squeeze()
-
-            print("att_mean_"+str(self.id))
-            print(att_mean.numpy(force=True))
-            plt.imshow(att_mean.numpy(force=True), cmap='gray', interpolation='nearest')
-            if self.wandb:
-                wandb.log({"att_mean_"+str(self.id): plt})
-            print("att_std_"+str(self.id))
-            print(att_std.numpy(force=True))
-            plt.imshow(att_std.numpy(force=True), cmap='gray', interpolation='nearest')
-            if self.wandb:
-                wandb.log({"att_std_"+str(self.id): plt})
+            att_mean = att
+            att_std = att.std(dim=0)
 
             np.save('att_mean_'+str(self.id)+'.pt', att_mean.numpy(force=True))
             if self.wandb:
@@ -204,6 +193,11 @@ class GPTBase(nn.Module):
         ))
 
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=True)
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
 
         # init all weights
         self.apply(self._init_weights)
@@ -330,6 +324,14 @@ class GPTBase(nn.Module):
                     # weights of blacklist modules will NOT be weight decayed
                     no_decay.add(fpn)
 
+        # subtle: 'transformer.wte.weight' and 'lm_head.weight' are tied, so they
+        # will appear in the no_decay and decay sets respectively after the above.
+        # In addition, because named_parameters() doesn't return duplicates, it
+        # will only return the first occurence, key'd by 'transformer.wte.weight', below.
+        # so let's manually remove 'lm_head.weight' from decay set. This will include
+        # this tensor into optimization via transformer.wte.weight only, and not decayed.
+        decay.remove('lm_head.weight')
+            
         # validate that we considered every parameter
         param_dict = {pn: p for pn, p in self.named_parameters()}
         inter_params = decay & no_decay
